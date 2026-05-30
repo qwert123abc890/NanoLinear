@@ -12,11 +12,13 @@
 #include <sys/mman.h>
 #endif
 
-/**
- * @brief 工业级跨平台 O(1) 位图检索安全函数
- * @param available_bins 经过掩码过滤后的 64 位无符号位图整数
- * @return 如果找到有货的 Bin，返回其索引(0~63)；若全空(为0)，则安全返回 -1
+/*
+ 工业级跨平台 O(1) 位图检索安全函数
+ available_bins 经过掩码过滤后的 64 位无符号位图整数
+ 如果找到有货的 Bin，返回其索引(0~63)；若全空(为0)，则安全返回 -1
  */
+
+/*
 inline int safe_find_first_bin(uint64_t available_bins) noexcept {
 #ifdef _WIN32
 	unsigned long index;
@@ -38,7 +40,7 @@ inline int safe_find_first_bin(uint64_t available_bins) noexcept {
 	return __builtin_ctzll(available_bins);
 #endif
 }
-
+*/
 class BinManager
 {
 private:
@@ -56,11 +58,13 @@ private:
 	int get_bin_index(size_t size)
 	{
 		if (size > 1040) return 63; //超过1040字节的内存块则使用mmap内存映射
-		return static_cast<int>((size + 15) / 16) - 2;
+		//return static_cast<int>((size + 15) / 16) - 2;
+		return static_cast<int>((size + 15) >> 4) - 2;
 	}
 
 
-	void* request_from_os(size_t need_size) {
+	void* request_from_os(size_t need_size) 
+	{
 		// 无论用户要多少，一律以 4KB 物理页为基本单位向操作系统批发
 		// 一个哨兵占 48 字节，首尾共 96 字节
 		size_t page_size = (need_size + 96 + 4095) & ~4095;
@@ -215,42 +219,50 @@ public:
 		int user_need_bin = get_bin_index(need); //发现只要存在best_fit就存在分支，原本想减少分支来强制bin为64个
 		//使用BitMap来快速判断对应bin是否有可用的内存块
 		uint64_t filtered = bin_bitmap & ((~0ULL) << user_need_bin);
-		uint64_t great_bin = safe_find_first_bin(filtered);
-		if (great_bin == -1)
-		{
-			[[unlikely]];
-			return nullptr; //没有合适的内存块了，返回nullptr
-		}
-		BinHeader* curr_head = &virtual_heads[great_bin];
-		BinHeader* ptr ;
-		if (great_bin != 63)
-		{
-			[[likely]];
-			ptr = curr_head->next;
-		}
-		else
-		{
-			ptr = curr_head->find_best_fit(need);
-		}
-		ptr->remove_from_list();
-		if (curr_head->next == curr_head) bin_bitmap &= ~(1ULL << great_bin); //更新位图，标记该bin没有可用内存块了
-		BinHeader* remaining_ptr = ptr->split(need);
-		if (remaining_ptr) 
-		{
-			[[likely]];
-			insert_into_bin(remaining_ptr);
-		}
-			
-		uint64_t* canary = reinterpret_cast<uint64_t*>(reinterpret_cast<char*>(ptr) + ptr->size - sizeof(uint64_t) - sizeof(size_t));
-		*canary = 0xDEADBEEFCAFEBABEULL;
+		uint64_t great_bin ;
 
-		size_t* size_ptr = reinterpret_cast<size_t*>(canary + 1);
-		*size_ptr = ptr->size;
+#ifdef _WIN32
+			unsigned long index;
+			if (_BitScanForward64(&index, filtered))
+			{
+				great_bin = static_cast<int>(index);
+#else
+			if(filtered)
+			{ 
+				great_bin = __builtin_ctzll(filtered);
+#endif
+				BinHeader* curr_head = &virtual_heads[great_bin];
+				BinHeader* ptr;
+				if (great_bin != 63)
+				{
+					[[likely]];
+					ptr = curr_head->next;
+				}
+				else
+				{
+					ptr = curr_head->find_best_fit(need);
+				}
+				ptr->remove_from_list();
+				if (curr_head->next == curr_head) bin_bitmap &= ~(1ULL << great_bin); //更新位图，标记该bin没有可用内存块了
+				BinHeader* remaining_ptr = ptr->split(need);
+				if (remaining_ptr)
+				{
+					[[likely]];
+					insert_into_bin(remaining_ptr);
+				}
 
-		return ptr->user_ptr();
+				uint64_t* canary = reinterpret_cast<uint64_t*>(reinterpret_cast<char*>(ptr) + ptr->size - sizeof(uint64_t) - sizeof(size_t));
+				*canary = 0xDEADBEEFCAFEBABEULL;
+
+				size_t* size_ptr = reinterpret_cast<size_t*>(canary + 1);
+				*size_ptr = ptr->size;
+
+				return ptr->user_ptr();
+		}
+
+		
 	}
-		//当need为64
-
+	
 		/*
 		//发现没有合适的内存块，继续向下一个bin寻找，直到找到合适的内存块或者所有bin都找完了
 		for (int i = bin_index; i < 64; ++i)
