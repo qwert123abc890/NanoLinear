@@ -140,7 +140,7 @@ public:
 	}
 	void* allocate(size_t user_need)
 	{
-		size_t need = (user_need + 2*sizeof(char) + sizeof(uint64_t) + alignasment - 1) & ~(alignasment - 1);
+		size_t need = (user_need + 2*sizeof(char) + sizeof(bool) + sizeof(uint64_t) + alignasment - 1) & ~(alignasment - 1);
 		int user_need_bin = get_bin_index(need); //发现只要存在best_fit就存在分支，原本想减少分支来强制bin为64个
 		//使用BitMap来快速判断对应bin是否有可用的内存块
 		uint64_t filtered = first_bin_bitmap & ((~0ULL) << user_need_bin);
@@ -148,22 +148,30 @@ public:
 		{
 			[[unlikely]];
 			//发现没有合适的内存块，指针碰撞法
-			size_t total_need = need * 32;
+			size_t total_need = need * 64;
 			//指针碰撞法,考虑是把整个bin桶都顺便填满
 			if (current_top + total_need <= (char*)os_page_address + os_page_size - 48)
 			{
 				[[likely]];
 				char* available_block = current_top;
 				current_top += total_need;
-				bool* is_used_ptr = (bool*)(available_block + need - sizeof(char));
-				*is_used_ptr = true;
-				char* first_bin_index = (char*)(is_used_ptr - sizeof(bool));
-				*first_bin_index = user_need_bin;
-				char* second_bin_index = first_bin_index - sizeof(char);
+
+				//更新位图
+				first_bin_bitmap |= (1ULL << user_need_bin);
 				second_bin_bitmap[user_need_bin] = (~0ULL) ^ 1ULL;
-				uint64_t * canary = (uint64_t*)( available_block + need - 2 * sizeof(uint64_t) );//考虑内存填充
+				bin_head[user_need_bin] = available_block;
+				
+				char* first_bin_index = available_block;
+				*first_bin_index = user_need_bin;
+				char* second_bin_index = first_bin_index + sizeof(char);
+				*second_bin_index = 0;
+				bool* is_used_ptr = (bool*)(second_bin_index + sizeof(char));
+				*is_used_ptr = true;
+				uint64_t* canary = (uint64_t*)(available_block + need - sizeof(uint64_t));
 				*canary = 0xDEADBEEFCAFEBABEULL;
-				return available_block;
+
+				return available_block + 2 * sizeof(char) + sizeof(bool);
+			
 			}
 			return nullptr;
 		}
@@ -182,7 +190,9 @@ public:
 
 #ifdef _WIN32
 		unsigned long index2;
-		size_t available_index = _BitScanForward64(&index2, second_bin_bitmap[first_bin]);
+		//size_t available_index = _BitScanForward64(&index2, second_bin_bitmap[first_bin]);
+		_BitScanForward64(&index2, second_bin_bitmap[first_bin]);
+		size_t available_index = static_cast<char>(index2);
 
 #else
 
@@ -190,6 +200,7 @@ public:
 #endif
 		//需要知道当前bin桶的内存块大小，才能计算出block_size和available_block
 		//更新位图,标记该bin的available_index位置的内存块被占用了
+		unsigned long sbb = second_bin_bitmap[first_bin];
 		second_bin_bitmap[first_bin] &= ~(1ULL << available_index);
 		if (second_bin_bitmap[first_bin] == 0)
 		{
@@ -199,19 +210,20 @@ public:
 		size_t block_size = (first_bin + 2) * 16;
 		char* available_block = bin_head[first_bin] + available_index * block_size;
 
-		bool* is_used_ptr = (bool*)(available_block + block_size - sizeof(char));
-		*is_used_ptr = true;
-
-		char* first_bin_index = (char*)(is_used_ptr - sizeof(bool));
+		char* first_bin_index = available_block;
 		*first_bin_index = first_bin;
 
-		char* second_bin_index = first_bin_index - sizeof(char) ;
+		char* second_bin_index = first_bin_index + sizeof(char);
 		*second_bin_index = available_index;
 
-		uint64_t* canary = (uint64_t*)(available_block + block_size - 2 * sizeof(uint64_t));//考虑内存填充
+		bool* is_used_ptr = (bool*)(second_bin_index + sizeof(char));
+		*is_used_ptr = true;
+
+		uint64_t* canary = (uint64_t*)(available_block + block_size - sizeof(uint64_t));
 		*canary = 0xDEADBEEFCAFEBABEULL;
 
-		return available_block;	
+		return available_block+2*sizeof(char)+sizeof(bool);
+		
 	}
 
 	void deallocate(void* user_ptr)
@@ -222,14 +234,16 @@ public:
 			[[unlikely]];
 
 		}
-		uint64_t* canary = (uint64_t*)((char*)user_ptr - 2*sizeof(uint64_t));
+		char* first_bin_index = (char*)(is_used_ptr - 2*sizeof(char));
+		uint64_t* canary = (uint64_t*)((char*)user_ptr + ((size_t)(*first_bin_index) + 2) * 16 - sizeof(uint64_t));
 		if (*canary != 0xDEADBEEFCAFEBABEULL)
 		{
 			[[unlikely]];
+			//警报
 
 		}
-		char* first_bin_index = (char*)(is_used_ptr - sizeof(bool));
-		char* second_bin_index = first_bin_index - sizeof(char);
+		char* second_bin_index = first_bin_index + sizeof(char);
+		second_bin_bitmap[(size_t)(*first_bin_index)] |= (1ULL << (*second_bin_index)); //更新位图，标记该bin的available_index位置的内存块被释放了
 		*is_used_ptr = false;
 		first_bin_bitmap |= (1ULL << (*first_bin_index)); //更新位图，标记该bin有可用内存块了
 
