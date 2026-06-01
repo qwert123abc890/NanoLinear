@@ -1,2 +1,13 @@
 # NanoLinear
+
+2026_5_28
 A lightweight version of memory allocator designed for single-threaded or single-lifecycle scenarios, striving for unrivaled performance in the nanosecond-level throughput race and pursuing ultimate efficiency.
+1.彻底去除allocate中的for循环，引入bin_bitmap,该为用硬件层面指令的内置函数在一个CPU周期中快速查找到最合适的bin.考虑到uint64为64位，当前恰好满足应用需求，
+Linux系统用_builtin_ctill, 如果mask是0会造成未定义行为，需要提前检查是否为0
+windows系统用unsigned char _BitScanForward64(unsigned long* Index, unsigned __int64 Mask); 更加安全， 如果是0，会自动返回0
+
+2.利用指令的分支预测来优化,减少猜测分支造成的流水线排空。c++20的[[likely]]和[[unlikely]]
+
+3.优化find_best_fit 和 insert_into_bin,使bin64的内存块大小有序，平摊成本，在need大于1040时，寻找最合适的内存块更加快速。
+
+4.结合实际应用情况，缩减remove_from_list的内部代码来优化性能。无需额外令this的prev和next为nullptr
