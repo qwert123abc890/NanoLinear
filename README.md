@@ -11,3 +11,7 @@ windows系统用unsigned char _BitScanForward64(unsigned long* Index, unsigned _
 3.优化find_best_fit 和 insert_into_bin,使bin64的内存块大小有序，平摊成本，在need大于1040时，寻找最合适的内存块更加快速。
 
 4.结合实际应用情况，缩减remove_from_list的内部代码来优化性能。无需额外令this的prev和next为nullptr
+
+2026_5_30
+应用在延迟率低场景，解决父项目中merge()和split()造成的延迟问题。
+采用二级位图架构，舍弃原有的双向内存块链表结构，也不采用隐式栈结构，大幅度提高CPU命中率。
