@@ -46,11 +46,11 @@ class TwoLevelBitmapAllocator
 private:
 	uint64_t first_bin_bitmap; //使用位图来记录每个bin是否有可用的内存块，1表示有可用内存块，0表示没有可用内存块
 	uint64_t second_bin_bitmap[64];
-	char* bin_head[64];
+	unsigned char* bin_head[64];
 	//常规bin都有一大块连续的内存块，大小固定，无需Header
 	void* os_page_address;
 	size_t os_page_size;
-	char* current_top;
+	unsigned char* current_top;
 	size_t alignasment;
 	void* request_from_os(size_t need_size) 
 	{
@@ -70,20 +70,20 @@ private:
 			header_ptr->prev = nullptr;
 			header_ptr->next = nullptr;
 
-			size_t* size_ptr = reinterpret_cast<size_t*>(reinterpret_cast<char*>(mem) + 40);
+			size_t* size_ptr = reinterpret_cast<size_t*>(reinterpret_cast<unsigned char*>(mem) + 40);
 			*size_ptr = 48;
 
-			char* back_sentinel_start = reinterpret_cast<char*>(mem) + page_size - 48;
+			unsigned char* back_sentinel_start = reinterpret_cast<unsigned char*>(mem) + page_size - 48;
 			BinHeader* back_ptr = reinterpret_cast<BinHeader*>(back_sentinel_start);
 			back_ptr->size = 48;
 			back_ptr->is_used = true;
 			back_ptr->prev = nullptr;
 			back_ptr->next = nullptr;
 
-			size_t* back_size_ptr = reinterpret_cast<size_t*>(reinterpret_cast<char*>(mem) + page_size - sizeof(size_t));
+			size_t* back_size_ptr = reinterpret_cast<size_t*>(reinterpret_cast<unsigned char*>(mem) + page_size - sizeof(size_t));
 			*back_size_ptr = 48;
 
-			mem = reinterpret_cast<void*>(reinterpret_cast<char*>(mem) + 48);
+			mem = reinterpret_cast<void*>(reinterpret_cast<unsigned char*>(mem) + 48);
 		}
 		return mem;
 #else 
@@ -102,27 +102,27 @@ private:
 		header_ptr->prev = nullptr;
 		header_ptr->next = nullptr;
 
-		size_t* size_ptr = reinterpret_cast<size_t*>(reinterpret_cast<char*>(mem) + 40);
+		size_t* size_ptr = reinterpret_cast<size_t*>(reinterpret_cast<unsigned char*>(mem) + 40);
 		*size_ptr = 48;
 
-		char* back_sentinel_start = reinterpret_cast<char*>(mem) + page_size - 48;
+		unsigned char* back_sentinel_start = reinterpret_cast<unsigned char*>(mem) + page_size - 48;
 		BinHeader* back_ptr = reinterpret_cast<BinHeader*>(back_sentinel_start);
 		back_ptr->size = 48;
 		back_ptr->is_used = true;
 		back_ptr->prev = nullptr;
 		back_ptr->next = nullptr;
 
-		size_t* back_size_ptr = reinterpret_cast<size_t*>(reinterpret_cast<char*>(mem) + page_size - sizeof(size_t));
+		size_t* back_size_ptr = reinterpret_cast<size_t*>(reinterpret_cast<unsigned char*>(mem) + page_size - sizeof(size_t));
 		*back_size_ptr = 48;
 
-		mem = reinterpret_cast<void*>(reinterpret_cast<char*>(mem) + 48);
+		mem = reinterpret_cast<void*>(reinterpret_cast<unsigned char*>(mem) + 48);
 		return mem;
 #endif 
 	}
 	int get_bin_index(size_t size)
 	{
 		if (size > 1040) return 63; //超过1040字节的内存块则使用mmap内存映射
-		return static_cast<int>((size + 15) / 16) - 2;
+		return static_cast<int>((size + 15) >> 4) - 2;
 	}
 public:
 	TwoLevelBitmapAllocator(const size_t& page_need_size = 4096) : alignasment(alignof(std::max_align_t)), first_bin_bitmap(0)
@@ -134,14 +134,45 @@ public:
 		//	bin_head[i] = nullptr;
 		//}
 		
-		current_top =reinterpret_cast<char*>( request_from_os(page_need_size) );
+		current_top =reinterpret_cast<unsigned char*>( request_from_os(page_need_size) );
 		assert(((uintptr_t)current_top & 15) == 0 && "If the memory blocks allocated by the operating system are not aligned, it will cause the foundation to crash.");
 
 	}
 	void* allocate(size_t user_need)
 	{
-		size_t need = (user_need + 2*sizeof(char) + sizeof(bool) + sizeof(uint64_t) + alignasment - 1) & ~(alignasment - 1);
-		int user_need_bin = get_bin_index(need); //发现只要存在best_fit就存在分支，原本想减少分支来强制bin为64个
+		//size_t need = (user_need + 2*sizeof(unsigned char) + sizeof(bool) + sizeof(uint64_t) + alignasment - 1) & ~(alignasment - 1);
+		size_t need = (user_need + 16 + sizeof(uint64_t) + alignasment - 1) & ~(alignasment - 1);
+		//int user_need_bin = get_bin_index(need);
+		int user_need_bin;
+		if (need > 1040)
+		{
+			[[unlikely]];
+#ifdef _WIN32
+		void* mem = VirtualAlloc(nullptr, need, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+		unsigned char* first_bin_index = reinterpret_cast<unsigned char*>(mem);
+		*first_bin_index = 63;
+		unsigned char* second_bin_index = first_bin_index + sizeof(unsigned char);
+		*second_bin_index = static_cast<unsigned char>(63 - __lzcnt64(need));
+		bool* is_used = reinterpret_cast<bool*>(second_bin_index + sizeof(unsigned char));
+		*is_used = true;
+		return reinterpret_cast<void*>((char*)mem + 16);
+#else
+		void* mem = mmap(nullptr, need, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+		unsigned char* first_bin_index = reinterpret_cast<unsigned char*>(mem);
+		*first_bin_index = 63;
+		unsigned char* second_bin_index = first_bin_index + sizeof(unsigned char);
+		*second_bin_index = static_cast<unsigned char>(63 - __builtin_clzll(need));
+		bool* is_used = reinterpret_cast<bool*>(second_bin_index + sizeof(unsigned char));
+		*is_used = true;
+		return reinterpret_cast<void*>((char*)mem + 16);
+#endif
+		}
+		else
+		{
+			[[likely]];
+			user_need_bin = static_cast<int>((need + 15) >> 4) - 2;
+		}
+		//发现只要存在best_fit就存在分支，原本想减少分支来强制bin为64个
 		//使用BitMap来快速判断对应bin是否有可用的内存块
 		uint64_t filtered = first_bin_bitmap & ((~0ULL) << user_need_bin);
 		if (!filtered)
@@ -150,10 +181,10 @@ public:
 			//发现没有合适的内存块，指针碰撞法
 			size_t total_need = need * 64;
 			//指针碰撞法,考虑是把整个bin桶都顺便填满
-			if (current_top + total_need <= (char*)os_page_address + os_page_size - 48)
+			if (current_top + total_need <= (unsigned char*)os_page_address + os_page_size - 48)
 			{
 				[[likely]];
-				char* available_block = current_top;
+				unsigned char* available_block = current_top;
 				current_top += total_need;
 
 				//更新位图
@@ -161,26 +192,26 @@ public:
 				second_bin_bitmap[user_need_bin] = (~0ULL) ^ 1ULL;
 				bin_head[user_need_bin] = available_block;
 				
-				char* first_bin_index = available_block;
+				unsigned char* first_bin_index = available_block;
 				*first_bin_index = user_need_bin;
-				char* second_bin_index = first_bin_index + sizeof(char);
+				unsigned char* second_bin_index = first_bin_index + sizeof(unsigned char);
 				*second_bin_index = 0;
-				bool* is_used_ptr = (bool*)(second_bin_index + sizeof(char));
+				bool* is_used_ptr = (bool*)(second_bin_index + sizeof(unsigned char));
 				*is_used_ptr = true;
-				uint64_t* canary = (uint64_t*)(available_block + need - sizeof(uint64_t));
+				uint64_t* canary = (uint64_t*)(available_block + need - sizeof(uint64_t));// 此时need等于block_size
 				*canary = 0xDEADBEEFCAFEBABEULL;
 
-				return available_block + 2 * sizeof(char) + sizeof(bool);
+				return available_block + 16;
 			
 			}
 			return nullptr;
 		}
-		char first_bin;
+		unsigned char first_bin;
 
 #ifdef _WIN32
 		unsigned long index;
 		_BitScanForward64(&index, filtered);
-		first_bin = static_cast<char>(index);
+		first_bin = static_cast<unsigned char>(index);
 #else
 		first_bin = __builtin_ctzll(filtered);
 		
@@ -192,7 +223,7 @@ public:
 		unsigned long index2;
 		//size_t available_index = _BitScanForward64(&index2, second_bin_bitmap[first_bin]);
 		_BitScanForward64(&index2, second_bin_bitmap[first_bin]);
-		size_t available_index = static_cast<char>(index2);
+		size_t available_index = static_cast<unsigned char>(index2);
 
 #else
 
@@ -200,7 +231,6 @@ public:
 #endif
 		//需要知道当前bin桶的内存块大小，才能计算出block_size和available_block
 		//更新位图,标记该bin的available_index位置的内存块被占用了
-		unsigned long sbb = second_bin_bitmap[first_bin];
 		second_bin_bitmap[first_bin] &= ~(1ULL << available_index);
 		if (second_bin_bitmap[first_bin] == 0)
 		{
@@ -208,41 +238,59 @@ public:
 			first_bin_bitmap &= ~(1ULL << first_bin); //更新位图，标记该bin没有可用内存块了
 		}
 		size_t block_size = (first_bin + 2) * 16;
-		char* available_block = bin_head[first_bin] + available_index * block_size;
+		unsigned char* available_block = bin_head[first_bin] + available_index * block_size;
 
-		char* first_bin_index = available_block;
+		unsigned char* first_bin_index = available_block;
 		*first_bin_index = first_bin;
 
-		char* second_bin_index = first_bin_index + sizeof(char);
+		unsigned  char* second_bin_index = first_bin_index + sizeof(unsigned char);
 		*second_bin_index = available_index;
 
-		bool* is_used_ptr = (bool*)(second_bin_index + sizeof(char));
+		bool* is_used_ptr = (bool*)(second_bin_index + sizeof(unsigned char));
 		*is_used_ptr = true;
 
 		uint64_t* canary = (uint64_t*)(available_block + block_size - sizeof(uint64_t));
 		*canary = 0xDEADBEEFCAFEBABEULL;
 
-		return available_block+2*sizeof(char)+sizeof(bool);
+		return available_block + 16;
 		
 	}
 
 	void deallocate(void* user_ptr)
 	{
-		bool* is_used_ptr = (bool*)user_ptr - 1;
+		bool* is_used_ptr = (bool*)((char*)user_ptr - 13);
 		if (*is_used_ptr)
 		{
 			[[unlikely]];
 
 		}
-		char* first_bin_index = (char*)(is_used_ptr - 2*sizeof(char));
-		uint64_t* canary = (uint64_t*)((char*)user_ptr + ((size_t)(*first_bin_index) + 2) * 16 - sizeof(uint64_t));
+		unsigned char* first_bin_index = (unsigned char*)user_ptr - 16;
+		unsigned char* second_bin_index = first_bin_index + sizeof(unsigned char);
+		if (*first_bin_index == 63)
+		{
+			[[unlikely]];
+			uint64_t block_size = 1ULL << (*second_bin_index);
+			uint64_t* canary = (uint64_t*)(first_bin_index + block_size - sizeof(uint64_t));
+			if (*canary != 0xDEADBEEFCAFEBABEULL)
+			{
+				[[unlikely]];
+				//警报
+
+			}
+#ifdef _WIN32
+			VirtualFree(first_bin_index, 0, MEM_RELEASE);
+#else
+			munmap(first_bin_index, block_size);
+#endif
+			return;
+		}
+		uint64_t* canary = (uint64_t*)((unsigned char*)user_ptr + ((size_t)(*first_bin_index) + 2) * 16 - sizeof(uint64_t));
 		if (*canary != 0xDEADBEEFCAFEBABEULL)
 		{
 			[[unlikely]];
 			//警报
 
 		}
-		char* second_bin_index = first_bin_index + sizeof(char);
 		second_bin_bitmap[(size_t)(*first_bin_index)] |= (1ULL << (*second_bin_index)); //更新位图，标记该bin的available_index位置的内存块被释放了
 		*is_used_ptr = false;
 		first_bin_bitmap |= (1ULL << (*first_bin_index)); //更新位图，标记该bin有可用内存块了
